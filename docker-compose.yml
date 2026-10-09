@@ -1,0 +1,8 @@
+services:
+  owncall:
+    build: .
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+    environment:
+      ADDR: ":8080"
