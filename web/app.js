@@ -1,7 +1,142 @@
-let ws, stream, peerId, room, peers = new Map(), muted = false, cameraOff = false;
-const $ = id => document.getElementById(id); const rtcConfig = {iceServers: window.OWNCALL_ICE_SERVERS || []};
-$('join').onclick = join; $('leave').onclick = leave; $('mute').onclick = () => { muted=!muted; stream?.getAudioTracks().forEach(t=>t.enabled=!muted); $('mute').textContent=muted?'Включить микрофон':'Выключить микрофон'; }; $('camera').onclick = () => { cameraOff=!cameraOff; stream?.getVideoTracks().forEach(t=>t.enabled=!cameraOff); $('camera').textContent=cameraOff?'Включить камеру':'Выключить камеру'; };
-async function join(){ room=$('room').value.trim()||'demo-room'; peerId=(crypto.randomUUID?.()||Math.random().toString(36).slice(2)); const name=$('name').value.trim(); if(name) peerId=name+'-'+peerId.slice(0,6); try{stream=await navigator.mediaDevices.getUserMedia({audio:true,video:true});$('local').srcObject=stream; const protocol=location.protocol==='https:'?'wss':'ws'; ws=new WebSocket(`${protocol}://${location.host}/ws?room=${encodeURIComponent(room)}&peer=${encodeURIComponent(peerId)}`); ws.onopen=()=>setStatus('В комнате '+room); ws.onmessage=e=>onSignal(JSON.parse(e.data)); ws.onclose=()=>setStatus('Соединение закрыто'); $('setup').classList.add('hidden'); $('call').classList.remove('hidden');}catch(e){alert('Не удалось получить камеру/микрофон: '+e.message)}}
-async function onSignal(m){if(m.type==='peers'){for(const id of (m.data||[])) await makePeer(id,true)} else if(m.type==='peer-joined'){setStatus('Новый участник подключился')} else if(m.type==='offer'){const pc=await makePeer(m.from,false); await pc.setRemoteDescription(m.data); const answer=await pc.createAnswer(); await pc.setLocalDescription(answer); send('answer',m.from,pc.localDescription)} else if(m.type==='answer'){const pc=peers.get(m.from)?.pc; if(pc) await pc.setRemoteDescription(m.data)} else if(m.type==='candidate'){const pc=peers.get(m.from)?.pc; if(pc) await pc.addIceCandidate(m.data)} else if(m.type==='peer-left'){removePeer(m.peer)}}
-async function makePeer(id,initiator){if(peers.has(id)) return peers.get(id).pc; const pc=new RTCPeerConnection(rtcConfig), entry={pc,id}; peers.set(id,entry); stream.getTracks().forEach(t=>pc.addTrack(t,stream)); pc.onicecandidate=e=>e.candidate&&send('candidate',id,e.candidate); pc.ontrack=e=>showRemote(id,e.streams[0]); pc.onconnectionstatechange=()=>{if(['failed','closed','disconnected'].includes(pc.connectionState)) removePeer(id)}; if(initiator){const offer=await pc.createOffer(); await pc.setLocalDescription(offer); send('offer',id,pc.localDescription)} return pc}
-function send(type,to,data){if(ws?.readyState===1)ws.send(JSON.stringify({type,to,data}))} function showRemote(id,s){let v=document.querySelector(`[data-peer="${CSS.escape(id)}"]`);if(!v){const card=document.createElement('div');card.className='video-card';card.dataset.peer=id;v=document.createElement('video');v.autoplay=true;v.playsInline=true;card.append(v);const label=document.createElement('span');label.textContent=id.split('-')[0];card.append(label);$('remote-list').append(card)}v.srcObject=s} function removePeer(id){const p=peers.get(id);p?.pc.close();peers.delete(id);document.querySelector(`[data-peer="${CSS.escape(id)}"]`)?.closest('.video-card')?.remove()} function setStatus(s){$('status').textContent=s} function leave(){peers.forEach(p=>p.pc.close());peers.clear();stream?.getTracks().forEach(t=>t.stop());ws?.close();$('call').classList.add('hidden');$('setup').classList.remove('hidden')}
+let ws;
+let stream;
+let peerId;
+let room;
+let peers = new Map();
+let muted = false;
+let cameraOff = false;
+
+const $ = (id) => document.getElementById(id);
+const rtcConfig = { iceServers: window.OWNCALL_ICE_SERVERS || [] };
+
+$('join').onclick = join;
+$('leave').onclick = leave;
+$('mute').onclick = toggleMute;
+$('camera').onclick = toggleCamera;
+
+async function join() {
+  room = $('room').value.trim() || 'demo-room';
+  const randomId = crypto.randomUUID?.() || Math.random().toString(36).slice(2);
+  const name = $('name').value.trim().replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 24);
+  peerId = `${name || 'guest'}-${randomId.slice(0, 8)}`;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
+    $('local').srcObject = stream;
+    const protocol = location.protocol === 'https:' ? 'wss' : 'ws';
+    ws = new WebSocket(`${protocol}://${location.host}/ws?room=${encodeURIComponent(room)}&peer=${encodeURIComponent(peerId)}`);
+    ws.onopen = () => setStatus(`В комнате ${room}`);
+    ws.onmessage = (event) => onSignal(JSON.parse(event.data));
+    ws.onclose = () => setStatus('Соединение закрыто');
+    ws.onerror = () => setStatus('Ошибка соединения');
+    $('setup').classList.add('hidden');
+    $('call').classList.remove('hidden');
+  } catch (error) {
+    alert(`Не удалось получить камеру/микрофон: ${error.message}`);
+  }
+}
+
+async function onSignal(message) {
+  if (message.type === 'peers') {
+    for (const id of message.data || []) await makePeer(id, true);
+  } else if (message.type === 'peer-joined') {
+    setStatus('Новый участник подключился');
+  } else if (message.type === 'offer') {
+    const peer = await makePeer(message.from, false);
+    await peer.pc.setRemoteDescription(message.data);
+    await flushCandidates(peer);
+    const answer = await peer.pc.createAnswer();
+    await peer.pc.setLocalDescription(answer);
+    send('answer', message.from, peer.pc.localDescription);
+  } else if (message.type === 'answer') {
+    const peer = peers.get(message.from);
+    if (peer) {
+      await peer.pc.setRemoteDescription(message.data);
+      await flushCandidates(peer);
+    }
+  } else if (message.type === 'candidate') {
+    const peer = peers.get(message.from);
+    if (!peer) return;
+    if (peer.pc.remoteDescription) await peer.pc.addIceCandidate(message.data);
+    else peer.candidates.push(message.data);
+  } else if (message.type === 'peer-left') {
+    removePeer(message.peer);
+  } else if (message.type === 'error') {
+    setStatus('Ошибка: участник с таким именем уже подключён');
+  }
+}
+
+async function makePeer(id, initiator) {
+  if (peers.has(id)) return peers.get(id);
+  const pc = new RTCPeerConnection(rtcConfig);
+  const peer = { pc, id, candidates: [] };
+  peers.set(id, peer);
+  stream.getTracks().forEach((track) => pc.addTrack(track, stream));
+  pc.onicecandidate = (event) => event.candidate && send('candidate', id, event.candidate);
+  pc.ontrack = (event) => showRemote(id, event.streams[0]);
+  pc.onconnectionstatechange = () => {
+    if (['failed', 'closed', 'disconnected'].includes(pc.connectionState)) removePeer(id);
+  };
+  if (initiator) {
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    send('offer', id, pc.localDescription);
+  }
+  return peer;
+}
+
+async function flushCandidates(peer) {
+  for (const candidate of peer.candidates.splice(0)) await peer.pc.addIceCandidate(candidate);
+}
+
+function send(type, to, data) {
+  if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type, to, data }));
+}
+
+function showRemote(id, mediaStream) {
+  let video = document.querySelector(`[data-peer="${CSS.escape(id)}"]`);
+  if (!video) {
+    const card = document.createElement('div');
+    card.className = 'video-card';
+    card.dataset.peer = id;
+    video = document.createElement('video');
+    video.autoplay = true;
+    video.playsInline = true;
+    card.append(video);
+    const label = document.createElement('span');
+    label.textContent = id.split('-')[0];
+    card.append(label);
+    $('remote-list').append(card);
+  }
+  video.srcObject = mediaStream;
+}
+
+function removePeer(id) {
+  const peer = peers.get(id);
+  peer?.pc.close();
+  peers.delete(id);
+  document.querySelector(`[data-peer="${CSS.escape(id)}"]`)?.closest('.video-card')?.remove();
+}
+
+function toggleMute() {
+  muted = !muted;
+  stream?.getAudioTracks().forEach((track) => { track.enabled = !muted; });
+  $('mute').textContent = muted ? 'Включить микрофон' : 'Выключить микрофон';
+}
+
+function toggleCamera() {
+  cameraOff = !cameraOff;
+  stream?.getVideoTracks().forEach((track) => { track.enabled = !cameraOff; });
+  $('camera').textContent = cameraOff ? 'Включить камеру' : 'Выключить камеру';
+}
+
+function setStatus(text) { $('status').textContent = text; }
+
+function leave() {
+  peers.forEach((peer) => peer.pc.close());
+  peers.clear();
+  stream?.getTracks().forEach((track) => track.stop());
+  ws?.close();
+  $('remote-list').replaceChildren();
+  $('call').classList.add('hidden');
+  $('setup').classList.remove('hidden');
+}

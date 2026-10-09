@@ -1,8 +1,18 @@
 services:
   owncall:
     build: .
+    env_file:
+      - .env
     ports:
       - "8080:8080"
     restart: unless-stopped
-    environment:
-      ADDR: ":8080"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3

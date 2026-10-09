@@ -1,0 +1,18 @@
+services:
+  coturn:
+    image: coturn/coturn:4.6
+    restart: unless-stopped
+    network_mode: host
+    command:
+      - -n
+      - --log-file=stdout
+      - --no-cli
+      - --realm=${TURN_REALM:-example.com}
+      - --fingerprint
+      - --lt-cred-mech
+      - --user=${TURN_USER:?set TURN_USER}:${TURN_PASSWORD:?set TURN_PASSWORD}
+      - --listening-port=3478
+      - --min-port=49152
+      - --max-port=65535
+      # Set this when the server has a private address behind NAT:
+      # - --external-ip=PUBLIC_IP/PRIVATE_IP

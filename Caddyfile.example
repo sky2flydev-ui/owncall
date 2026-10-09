@@ -1,0 +1,4 @@
+# Copy to Caddyfile and replace the hostname.
+call.example.com {
+    reverse_proxy owncall:8080
+}
